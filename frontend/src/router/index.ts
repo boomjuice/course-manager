@@ -15,57 +15,75 @@ const router = createRouter({
     {
       path: '/',
       component: MainLayout,
-      meta: { requiresAuth: true },
+      meta: { requiresAuth: true, title: '首页' },
       children: [
         {
-          path: '/schedule',
+          path: '',
+          name: 'dashboard',
+          component: () => import('@/views/DashboardView.vue'),
+          meta: { title: '仪表盘' }
+        },
+        {
+          path: 'schedule',
           name: 'schedule',
-          component: () => import('@/views/ScheduleView.vue')
+          component: () => import('@/views/ScheduleView.vue'),
+          meta: { title: '课表管理' }
         },
         {
-          path: '/classes',
-          name: 'classes',
-          component: () => import('@/views/ClassListView.vue')
+          path: 'course-offerings',
+          name: 'course-offerings',
+          component: () => import('@/views/CourseOfferingListView.vue'),
+          meta: { title: '开班计划' }
         },
         {
-          path: '/students',
+          path: 'enrollments',
+          name: 'enrollments',
+          component: () => import('@/views/EnrollmentListView.vue'),
+          meta: { title: '报名管理' }
+        },
+        {
+          path: 'products',
+          name: 'products',
+          component: () => import('@/views/CourseProductListView.vue'),
+          meta: { title: '课程产品' }
+        },
+        {
+          path: 'students',
           name: 'students',
-          component: () => import('@/views/StudentListView.vue')
+          component: () => import('@/views/StudentListView.vue'),
+          meta: { title: '学生管理' }
         },
         {
-          path: '/teachers',
+          path: 'teachers',
           name: 'teachers',
-          component: () => import('@/views/TeacherListView.vue')
+          component: () => import('@/views/TeacherListView.vue'),
+          meta: { title: '教师管理' }
         },
         {
-          path: '/settings/grades',
-          name: 'grades',
-          component: () => import('@/views/GradeListView.vue')
-        },
-        {
-          path: '/settings/subjects',
-          name: 'subjects',
-          component: () => import('@/views/SubjectListView.vue')
-        },
-        {
-          path: '/settings/tags',
-          name: 'tags',
-          component: () => import('@/views/TagListView.vue')
-        },
-        {
-          path: '/settings/classrooms',
-          name: 'classrooms',
-          component: () => import('@/views/ClassroomListView.vue')
-        },
-        {
-          path: '/settings/campuses',
-          name: 'campuses',
-          component: () => import('@/views/CampusListView.vue')
-        },
-        {
-          path: '/settings/timeslots',
-          name: 'timeslots',
-          component: () => import('@/views/TimeSlotListView.vue')
+          path: 'settings',
+          name: 'settings',
+          component: { template: '<router-view />' }, // Parent for settings
+          meta: { title: '系统设置' },
+          children: [
+            {
+              path: 'classrooms',
+              name: 'classrooms',
+              component: () => import('@/views/ClassroomListView.vue'),
+              meta: { title: '教室管理' }
+            },
+            {
+              path: 'campuses',
+              name: 'campuses',
+              component: () => import('@/views/CampusListView.vue'),
+              meta: { title: '校区管理' }
+            },
+            {
+              path: 'data-dictionary',
+              name: 'data-dictionary',
+              component: () => import('@/views/DataDictionaryListView.vue'),
+              meta: { title: '数据字典' }
+            },
+          ]
         }
       ]
     }
@@ -76,15 +94,11 @@ router.beforeEach((to, from, next) => {
   const userStore = useUserStore()
 
   if (to.meta.requiresAuth && !userStore.isAuthenticated) {
-    // 此路由需要身份验证，请检查用户是否已登录
-    // 如果没有，则重定向到登录页面
     next({ name: 'login' })
   } else if (to.name === 'login' && userStore.isAuthenticated) {
-    // 如果用户已通过身份验证，则不允许他们访问登录页面
     next({ path: '/' })
   }
   else {
-    // 确保一定要调用 next()
     next()
   }
 })
