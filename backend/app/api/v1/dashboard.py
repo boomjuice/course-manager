@@ -24,6 +24,8 @@ from app.models.lesson_record import LessonRecord
 from app.schemas.common import success_response
 from app.schemas.dashboard import (
     KpiCard,
+    DistributionItem,
+    TrendDataPoint as DashboardTrendDataPoint,
     StudentDashboardOverview,
     StudentDashboardCourses,
     StudentDashboardRecords,
@@ -31,6 +33,12 @@ from app.schemas.dashboard import (
     StudentEnrollmentItem,
     StudentAttendanceRecord,
     StudentLessonRecord,
+    TeacherDashboardOverview,
+    TeacherDashboardClasses,
+    TeacherDashboardIncome,
+    TeacherScheduleItem,
+    TeacherClassItem,
+    TeacherStudentAttendance,
 )
 
 router = APIRouter(prefix="/dashboard", tags=["仪表盘"])
@@ -547,6 +555,512 @@ async def get_student_records(
         recent_attendance=recent_attendance,
         lesson_records=lesson_records,
         consumption_trend=[],  # 可以后续扩展
+    )
+
+    return success_response(response.model_dump())
+
+
+# ========== 教师仪表盘端点 ==========
+
+async def _get_teacher_for_user(db: DBSession, user_id: int) -> Teacher:
+    """
+    根据用户ID获取关联的教师记录。
+    教师通过 Teacher.user_id 关联到用户账号。
+    """
+    result = await db.execute(
+        select(Teacher).where(Teacher.user_id == user_id)
+    )
+    teacher = result.scalar_one_or_none()
+    if not teacher:
+        raise NotFoundException("未找到关联的教师记录")
+    return teacher
+
+
+def _require_teacher_role(current_user, scope: CampusScopedQuery):
+    """
+    检查当前用户是否是教师角色。
+    如果不是教师角色，抛出 403 错误。
+    """
+    role_code = scope.get_token_role_code(current_user)
+    if role_code != "teacher":
+        raise ForbiddenException("此接口仅供教师访问")
+
+
+@router.get("/teacher", summary="教师仪表盘概览")
+async def get_teacher_dashboard_overview(
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """
+    获取教师仪表盘概览数据。
+    包含：
+    - KPI卡片：今日课程数、本周课程数、本月课时数、在教班级数
+    - 今日排课列表
+    - 近期排课列表（未来7天）
+    """
+    scope = CampusScopedQuery()
+    _require_teacher_role(current_user, scope)
+
+    # 获取教师记录
+    teacher = await _get_teacher_for_user(db, current_user.id)
+
+    today = date.today()
+    next_week = today + timedelta(days=7)
+    month_start = today.replace(day=1)
+    week_start = today - timedelta(days=today.weekday())
+
+    # 1. 查询教师的活跃班级
+    class_plan_result = await db.execute(
+        select(ClassPlan)
+        .where(
+            and_(
+                ClassPlan.teacher_id == teacher.id,
+                ClassPlan.is_active == True,
+                ClassPlan.status.in_(["ongoing", "not_started"]),
+            )
+        )
+    )
+    active_class_plans = class_plan_result.scalars().all()
+
+    # 2. 查询今日排课
+    today_schedule_result = await db.execute(
+        select(Schedule)
+        .options(
+            selectinload(Schedule.class_plan).selectinload(ClassPlan.course),
+            selectinload(Schedule.classroom),
+        )
+        .where(
+            and_(
+                Schedule.teacher_id == teacher.id,
+                Schedule.schedule_date == today,
+                Schedule.status != "cancelled",
+            )
+        )
+        .order_by(Schedule.start_time)
+    )
+    today_schedules_raw = today_schedule_result.scalars().all()
+
+    # 3. 查询本周课程数
+    week_schedule_count = (await db.execute(
+        select(func.count())
+        .select_from(Schedule)
+        .where(
+            and_(
+                Schedule.teacher_id == teacher.id,
+                Schedule.schedule_date >= week_start,
+                Schedule.schedule_date <= week_start + timedelta(days=6),
+                Schedule.status != "cancelled",
+            )
+        )
+    )).scalar() or 0
+
+    # 4. 查询本月已完成课时数
+    month_hours_result = await db.execute(
+        select(func.sum(Schedule.lesson_hours))
+        .where(
+            and_(
+                Schedule.teacher_id == teacher.id,
+                Schedule.schedule_date >= month_start,
+                Schedule.schedule_date <= today,
+                Schedule.status == "completed",
+            )
+        )
+    )
+    month_lesson_hours = float(month_hours_result.scalar() or 0)
+
+    # 5. 查询近期排课（未来7天，包括今日）
+    upcoming_result = await db.execute(
+        select(Schedule)
+        .options(
+            selectinload(Schedule.class_plan).selectinload(ClassPlan.course),
+            selectinload(Schedule.classroom),
+        )
+        .where(
+            and_(
+                Schedule.teacher_id == teacher.id,
+                Schedule.schedule_date >= today,
+                Schedule.schedule_date <= next_week,
+                Schedule.status != "cancelled",
+            )
+        )
+        .order_by(Schedule.schedule_date, Schedule.start_time)
+    )
+    upcoming_schedules_raw = upcoming_result.scalars().all()
+
+    # 6. 获取每个排课的学生人数
+    schedule_ids = [s.id for s in upcoming_schedules_raw]
+    student_counts = {}
+    if schedule_ids:
+        # 通过 class_plan 获取报名人数
+        class_plan_ids = list(set(s.class_plan_id for s in upcoming_schedules_raw))
+        enrollment_counts = await db.execute(
+            select(
+                Enrollment.class_plan_id,
+                func.count(Enrollment.id).label("count")
+            )
+            .where(
+                and_(
+                    Enrollment.class_plan_id.in_(class_plan_ids),
+                    Enrollment.status == "active",
+                )
+            )
+            .group_by(Enrollment.class_plan_id)
+        )
+        class_plan_student_counts = {row.class_plan_id: row.count for row in enrollment_counts}
+        for s in upcoming_schedules_raw:
+            student_counts[s.id] = class_plan_student_counts.get(s.class_plan_id, 0)
+
+    # 构建排课列表
+    def _build_teacher_schedule_item(schedule: Schedule) -> TeacherScheduleItem:
+        class_plan = schedule.class_plan
+        course = class_plan.course if class_plan else None
+        return TeacherScheduleItem(
+            schedule_id=schedule.id,
+            schedule_date=schedule.schedule_date,
+            start_time=schedule.start_time,
+            end_time=schedule.end_time,
+            lesson_hours=float(schedule.lesson_hours or 0),
+            class_plan_id=schedule.class_plan_id,
+            class_plan_name=class_plan.name if class_plan else "",
+            course_name=course.name if course else "",
+            classroom_name=schedule.classroom.name if schedule.classroom else None,
+            campus_name=None,  # 可以后续加载
+            student_count=student_counts.get(schedule.id, 0),
+            status=schedule.status,
+        )
+
+    today_schedules = [_build_teacher_schedule_item(s) for s in today_schedules_raw]
+    upcoming_schedules = [_build_teacher_schedule_item(s) for s in upcoming_schedules_raw]
+
+    # 构建响应
+    response = TeacherDashboardOverview(
+        today_class_count=KpiCard(
+            label="今日课程",
+            value=len(today_schedules),
+            unit="节",
+        ),
+        week_class_count=KpiCard(
+            label="本周课程",
+            value=week_schedule_count,
+            unit="节",
+        ),
+        month_lesson_hours=KpiCard(
+            label="本月课时",
+            value=month_lesson_hours,
+            unit="课时",
+        ),
+        active_class_count=KpiCard(
+            label="在教班级",
+            value=len(active_class_plans),
+            unit="个",
+        ),
+        upcoming_schedules=upcoming_schedules,
+        today_schedules=today_schedules,
+    )
+
+    return success_response(response.model_dump())
+
+
+@router.get("/teacher/classes", summary="教师教学情况")
+async def get_teacher_classes(
+    current_user: CurrentUser,
+    db: DBSession,
+):
+    """
+    获取教师的教学情况。
+    包含：
+    - 授课班级列表（包括学生人数、排课完成情况）
+    - 学生出勤统计
+    - 班级学生分布图
+    """
+    scope = CampusScopedQuery()
+    _require_teacher_role(current_user, scope)
+
+    # 获取教师记录
+    teacher = await _get_teacher_for_user(db, current_user.id)
+
+    # 1. 查询教师的所有班级
+    class_plan_result = await db.execute(
+        select(ClassPlan)
+        .options(
+            selectinload(ClassPlan.course),
+            selectinload(ClassPlan.campus),
+        )
+        .where(
+            and_(
+                ClassPlan.teacher_id == teacher.id,
+                ClassPlan.is_active == True,
+            )
+        )
+    )
+    class_plans = class_plan_result.scalars().all()
+    class_plan_ids = [cp.id for cp in class_plans]
+
+    if not class_plan_ids:
+        # 没有班级，返回空数据
+        return success_response(TeacherDashboardClasses(
+            classes=[],
+            student_attendance=[],
+            students_by_class=[],
+        ).model_dump())
+
+    # 2. 获取每个班级的报名人数
+    enrollment_counts_result = await db.execute(
+        select(
+            Enrollment.class_plan_id,
+            func.count(Enrollment.id).label("count")
+        )
+        .where(
+            and_(
+                Enrollment.class_plan_id.in_(class_plan_ids),
+                Enrollment.status == "active",
+            )
+        )
+        .group_by(Enrollment.class_plan_id)
+    )
+    enrollment_counts = {row.class_plan_id: row.count for row in enrollment_counts_result}
+
+    # 3. 获取每个班级的排课统计
+    schedule_stats_result = await db.execute(
+        select(
+            Schedule.class_plan_id,
+            func.count(Schedule.id).label("total"),
+            func.sum(func.cast(Schedule.status == "completed", Integer)).label("completed")
+        )
+        .where(
+            and_(
+                Schedule.class_plan_id.in_(class_plan_ids),
+                Schedule.status != "cancelled",
+            )
+        )
+        .group_by(Schedule.class_plan_id)
+    )
+    schedule_stats = {
+        row.class_plan_id: (row.total, row.completed or 0)
+        for row in schedule_stats_result
+    }
+
+    # 构建班级列表
+    class_items = []
+    students_by_class = []
+    for cp in class_plans:
+        student_count = enrollment_counts.get(cp.id, 0)
+        total_schedules, completed_schedules = schedule_stats.get(cp.id, (0, 0))
+
+        class_items.append(TeacherClassItem(
+            class_plan_id=cp.id,
+            class_plan_name=cp.name,
+            course_name=cp.course.name if cp.course else "",
+            campus_name=cp.campus.name if cp.campus else None,
+            student_count=student_count,
+            total_schedules=total_schedules,
+            completed_schedules=completed_schedules,
+            remaining_schedules=total_schedules - completed_schedules,
+            status=cp.status,
+        ))
+
+        # 班级学生分布
+        if student_count > 0:
+            students_by_class.append(DistributionItem(
+                name=cp.name,
+                value=float(student_count),
+            ))
+
+    # 4. 获取学生出勤统计
+    # 首先获取这些班级的所有报名
+    enrollments_result = await db.execute(
+        select(Enrollment)
+        .options(selectinload(Enrollment.student))
+        .where(
+            and_(
+                Enrollment.class_plan_id.in_(class_plan_ids),
+                Enrollment.status == "active",
+            )
+        )
+    )
+    enrollments = enrollments_result.scalars().all()
+    enrollment_ids = [e.id for e in enrollments]
+
+    student_attendance_list = []
+    if enrollment_ids:
+        # 获取出勤统计
+        attendance_stats_result = await db.execute(
+            select(
+                StudentAttendance.enrollment_id,
+                func.count(StudentAttendance.id).label("total"),
+                func.sum(func.cast(StudentAttendance.status == "normal", Integer)).label("normal"),
+                func.sum(func.cast(StudentAttendance.status == "leave", Integer)).label("leave"),
+                func.sum(func.cast(StudentAttendance.status == "absent", Integer)).label("absent")
+            )
+            .where(StudentAttendance.enrollment_id.in_(enrollment_ids))
+            .group_by(StudentAttendance.enrollment_id)
+        )
+        attendance_stats = {
+            row.enrollment_id: (row.total, row.normal or 0, row.leave or 0, row.absent or 0)
+            for row in attendance_stats_result
+        }
+
+        # 构建学生出勤列表
+        for e in enrollments:
+            total, normal, leave, absent = attendance_stats.get(e.id, (0, 0, 0, 0))
+            attendance_rate = round((normal / total * 100) if total > 0 else 0, 1)
+
+            student_attendance_list.append(TeacherStudentAttendance(
+                student_id=e.student.id if e.student else 0,
+                student_name=e.student.name if e.student else "",
+                total_count=total,
+                normal_count=normal,
+                leave_count=leave,
+                absent_count=absent,
+                attendance_rate=attendance_rate,
+            ))
+
+    response = TeacherDashboardClasses(
+        classes=class_items,
+        student_attendance=student_attendance_list,
+        students_by_class=students_by_class,
+    )
+
+    return success_response(response.model_dump())
+
+
+@router.get("/teacher/income", summary="教师课时收入")
+async def get_teacher_income(
+    current_user: CurrentUser,
+    db: DBSession,
+    start_date: Optional[date] = Query(None, description="开始日期"),
+    end_date: Optional[date] = Query(None, description="结束日期"),
+):
+    """
+    获取教师的课时收入统计。
+    包含：
+    - KPI：本月预估收入、本月已授课时、课时单价
+    - 收入趋势（按月）
+    - 课时趋势（按月）
+    - 课时分布（按班级）
+    """
+    scope = CampusScopedQuery()
+    _require_teacher_role(current_user, scope)
+
+    # 获取教师记录
+    teacher = await _get_teacher_for_user(db, current_user.id)
+
+    today = date.today()
+    month_start = today.replace(day=1)
+    hourly_rate = float(teacher.hourly_rate or 0)
+
+    # 如果有时间过滤，使用过滤时间；否则使用本月
+    query_start = start_date if start_date else month_start
+    query_end = end_date if end_date else today
+
+    # 1. 查询已完成的课时数（在查询时间范围内）
+    month_hours_result = await db.execute(
+        select(func.sum(Schedule.lesson_hours))
+        .where(
+            and_(
+                Schedule.teacher_id == teacher.id,
+                Schedule.schedule_date >= query_start,
+                Schedule.schedule_date <= query_end,
+                Schedule.status == "completed",
+            )
+        )
+    )
+    month_hours = float(month_hours_result.scalar() or 0)
+    month_income = month_hours * hourly_rate
+
+    # 2. 查询课时分布（按班级）
+    hours_by_class_result = await db.execute(
+        select(
+            ClassPlan.name,
+            func.sum(Schedule.lesson_hours).label("hours")
+        )
+        .join(ClassPlan, ClassPlan.id == Schedule.class_plan_id)
+        .where(
+            and_(
+                Schedule.teacher_id == teacher.id,
+                Schedule.schedule_date >= query_start,
+                Schedule.schedule_date <= query_end,
+                Schedule.status == "completed",
+            )
+        )
+        .group_by(ClassPlan.id, ClassPlan.name)
+    )
+    hours_by_class = [
+        DistributionItem(name=row.name, value=float(row.hours or 0))
+        for row in hours_by_class_result
+    ]
+
+    # 3. 计算趋势数据（最近6个月）
+    income_trend = []
+    hours_trend = []
+
+    # 获取最近6个月的数据
+    for i in range(5, -1, -1):
+        # 计算月份
+        month_offset = today.month - i
+        year_offset = today.year
+        while month_offset <= 0:
+            month_offset += 12
+            year_offset -= 1
+        while month_offset > 12:
+            month_offset -= 12
+            year_offset += 1
+
+        m_start = date(year_offset, month_offset, 1)
+        # 计算月末
+        if month_offset == 12:
+            m_end = date(year_offset + 1, 1, 1) - timedelta(days=1)
+        else:
+            m_end = date(year_offset, month_offset + 1, 1) - timedelta(days=1)
+
+        # 查询这个月的课时
+        m_hours_result = await db.execute(
+            select(func.sum(Schedule.lesson_hours))
+            .where(
+                and_(
+                    Schedule.teacher_id == teacher.id,
+                    Schedule.schedule_date >= m_start,
+                    Schedule.schedule_date <= m_end,
+                    Schedule.status == "completed",
+                )
+            )
+        )
+        m_hours = float(m_hours_result.scalar() or 0)
+        m_income = m_hours * hourly_rate
+
+        date_label = m_start.strftime("%Y-%m")
+        income_trend.append(DashboardTrendDataPoint(
+            date=date_label,
+            value=m_income,
+            label=f"{m_start.month}月",
+        ))
+        hours_trend.append(DashboardTrendDataPoint(
+            date=date_label,
+            value=m_hours,
+            label=f"{m_start.month}月",
+        ))
+
+    response = TeacherDashboardIncome(
+        month_income=KpiCard(
+            label="本月预估收入",
+            value=month_income,
+            unit="元",
+            is_time_filtered=bool(start_date or end_date),
+        ),
+        month_hours=KpiCard(
+            label="本月已授课时",
+            value=month_hours,
+            unit="课时",
+            is_time_filtered=bool(start_date or end_date),
+        ),
+        hourly_rate=KpiCard(
+            label="课时单价",
+            value=hourly_rate,
+            unit="元/课时",
+        ),
+        income_trend=income_trend,
+        hours_trend=hours_trend,
+        hours_by_class=hours_by_class,
     )
 
     return success_response(response.model_dump())
