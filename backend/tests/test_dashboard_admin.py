@@ -714,3 +714,165 @@ class TestAdminDashboardTeachers:
             headers={"Authorization": f"Bearer {super_admin_token}"}
         )
         assert response.status_code == 200
+
+
+class TestAdminDashboardClasses:
+    """管理员仪表盘 - 班级分析 Tab"""
+
+    async def test_get_admin_classes(
+        self,
+        client: AsyncClient,
+        super_admin_token: str,
+        admin_test_class_plans: list[ClassPlan],
+        admin_test_enrollments: list[Enrollment],
+    ):
+        """超管可以访问班级分析"""
+        response = await client.get(
+            "/api/v1/dashboard/admin/classes",
+            headers={"Authorization": f"Bearer {super_admin_token}"}
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert "kpi_cards" in data
+        assert "status_distribution" in data
+        assert "occupancy_distribution" in data
+        assert "subject_distribution" in data
+        assert "progress_ranking" in data
+
+    async def test_campus_admin_classes(
+        self,
+        client: AsyncClient,
+        bj_admin_token: str,
+        admin_test_class_plans: list[ClassPlan],
+        admin_test_enrollments: list[Enrollment],
+    ):
+        """校区管理员可以访问班级分析"""
+        response = await client.get(
+            "/api/v1/dashboard/admin/classes",
+            headers={"Authorization": f"Bearer {bj_admin_token}"}
+        )
+        assert response.status_code == 200
+
+    async def test_student_cannot_access_admin_classes(
+        self,
+        client: AsyncClient,
+        student_token: str,
+    ):
+        """学生不能访问班级分析"""
+        response = await client.get(
+            "/api/v1/dashboard/admin/classes",
+            headers={"Authorization": f"Bearer {student_token}"}
+        )
+        assert response.status_code == 403
+
+    async def test_teacher_cannot_access_admin_classes(
+        self,
+        client: AsyncClient,
+        teacher_token: str,
+    ):
+        """教师不能访问班级分析"""
+        response = await client.get(
+            "/api/v1/dashboard/admin/classes",
+            headers={"Authorization": f"Bearer {teacher_token}"}
+        )
+        assert response.status_code == 403
+
+    async def test_admin_classes_kpi_structure(
+        self,
+        client: AsyncClient,
+        super_admin_token: str,
+        admin_test_class_plans: list[ClassPlan],
+    ):
+        """验证KPI卡片数据结构"""
+        response = await client.get(
+            "/api/v1/dashboard/admin/classes",
+            headers={"Authorization": f"Bearer {super_admin_token}"}
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+        kpi_cards = data["kpi_cards"]
+        # 应该有4个KPI卡片：班级总数、进行中班级、本月新开班、本月结业
+        assert len(kpi_cards) >= 4
+
+        # 验证每个卡片的结构
+        for card in kpi_cards:
+            assert "label" in card
+            assert "value" in card
+
+    async def test_admin_classes_distribution_structure(
+        self,
+        client: AsyncClient,
+        super_admin_token: str,
+        admin_test_class_plans: list[ClassPlan],
+    ):
+        """验证分布图数据结构"""
+        response = await client.get(
+            "/api/v1/dashboard/admin/classes",
+            headers={"Authorization": f"Bearer {super_admin_token}"}
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+        # 验证分布数据都是列表
+        assert isinstance(data["status_distribution"], list)
+        assert isinstance(data["occupancy_distribution"], list)
+        assert isinstance(data["subject_distribution"], list)
+        assert isinstance(data["progress_ranking"], list)
+
+    async def test_admin_classes_progress_ranking_structure(
+        self,
+        client: AsyncClient,
+        super_admin_token: str,
+        admin_test_class_plans: list[ClassPlan],
+    ):
+        """验证进度排名数据结构"""
+        response = await client.get(
+            "/api/v1/dashboard/admin/classes",
+            headers={"Authorization": f"Bearer {super_admin_token}"}
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+        progress_ranking = data["progress_ranking"]
+        # 如果有排名数据，验证其结构
+        if progress_ranking:
+            for item in progress_ranking:
+                assert "rank" in item
+                assert "name" in item
+                assert "value" in item
+
+    async def test_admin_classes_with_time_filter(
+        self,
+        client: AsyncClient,
+        super_admin_token: str,
+        admin_test_class_plans: list[ClassPlan],
+    ):
+        """支持时间过滤"""
+        start = (date.today() - timedelta(days=30)).isoformat()
+        end = date.today().isoformat()
+        response = await client.get(
+            f"/api/v1/dashboard/admin/classes?start_date={start}&end_date={end}",
+            headers={"Authorization": f"Bearer {super_admin_token}"}
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+        # 验证时间过滤标志
+        for kpi in data["kpi_cards"]:
+            if kpi.get("is_time_filtered"):
+                assert kpi["is_time_filtered"] is True
+
+    async def test_super_admin_filter_by_campus(
+        self,
+        client: AsyncClient,
+        super_admin_token: str,
+        test_campuses,
+        admin_test_class_plans: list[ClassPlan],
+    ):
+        """超管可以按校区筛选班级分析"""
+        campus_id = test_campuses[0].id
+        response = await client.get(
+            f"/api/v1/dashboard/admin/classes?campus_id={campus_id}",
+            headers={"Authorization": f"Bearer {super_admin_token}"}
+        )
+        assert response.status_code == 200

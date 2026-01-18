@@ -179,8 +179,64 @@
       </el-tab-pane>
 
       <el-tab-pane label="班级" name="classes">
-        <div class="tab-content">
-          <el-empty description="班级分析（待实现）" />
+        <div class="tab-content" v-loading="classesLoading">
+          <!-- KPI 卡片 -->
+          <el-row :gutter="20" class="kpi-row">
+            <el-col :span="6" v-for="kpi in classesData?.kpi_cards" :key="kpi.label">
+              <KpiCard
+                :label="kpi.label"
+                :value="kpi.value"
+                :unit="kpi.unit"
+                :trend="kpi.trend"
+                :is-time-filtered="kpi.is_time_filtered"
+              />
+            </el-col>
+          </el-row>
+
+          <!-- 图表区域 -->
+          <el-row :gutter="20">
+            <el-col :span="8">
+              <DistributionChart
+                v-if="classesData?.status_distribution?.length"
+                title="班级状态分布"
+                :data="classesData.status_distribution"
+                type="ring"
+              />
+            </el-col>
+            <el-col :span="8">
+              <DistributionChart
+                v-if="classesData?.occupancy_distribution?.length"
+                title="上座率分布"
+                :data="classesData.occupancy_distribution"
+                type="pie"
+              />
+            </el-col>
+            <el-col :span="8">
+              <DistributionChart
+                v-if="classesData?.subject_distribution?.length"
+                title="课程科目分布"
+                :data="classesData.subject_distribution"
+                type="pie"
+              />
+            </el-col>
+          </el-row>
+
+          <!-- 进度排名表格 -->
+          <el-card class="ranking-card">
+            <template #header>
+              <span>班级进度排名（Top 10）</span>
+            </template>
+            <el-table :data="classesData?.progress_ranking || []" stripe>
+              <el-table-column prop="rank" label="排名" width="80" />
+              <el-table-column prop="name" label="班级" />
+              <el-table-column label="进度">
+                <template #default="{ row }">
+                  <el-progress :percentage="row.value" :stroke-width="10" />
+                </template>
+              </el-table-column>
+              <el-table-column prop="extra" label="状态" width="100" />
+            </el-table>
+          </el-card>
         </div>
       </el-tab-pane>
 
@@ -196,8 +252,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import { getAdminDashboard, getAdminStudents, getAdminTeachers } from '@/api/dashboard'
-import type { AdminDashboardOverview, AdminDashboardStudents, AdminDashboardTeachers, TimeRangeParams } from '@/api/dashboard'
+import { getAdminDashboard, getAdminStudents, getAdminTeachers, getAdminClasses } from '@/api/dashboard'
+import type { AdminDashboardOverview, AdminDashboardStudents, AdminDashboardTeachers, AdminDashboardClasses, TimeRangeParams } from '@/api/dashboard'
 import KpiCard from './components/KpiCard.vue'
 import TimeRangeSelector from './components/TimeRangeSelector.vue'
 import TrendChart from './components/TrendChart.vue'
@@ -209,6 +265,7 @@ const activeTab = ref('overview')
 const overviewData = ref<AdminDashboardOverview | null>(null)
 const studentsData = ref<AdminDashboardStudents | null>(null)
 const teachersData = ref<AdminDashboardTeachers | null>(null)
+const classesData = ref<AdminDashboardClasses | null>(null)
 const timeRange = ref<TimeRangeParams>({})
 const selectedCampusId = ref<number | null>(null)
 const campusList = ref<Array<{ id: number; name: string }>>([])
@@ -216,6 +273,7 @@ const campusList = ref<Array<{ id: number; name: string }>>([])
 const overviewLoading = ref(false)
 const studentsLoading = ref(false)
 const teachersLoading = ref(false)
+const classesLoading = ref(false)
 
 // 判断是否为超级管理员（可跨校区查看数据）
 const isSuperAdmin = computed(() => {
@@ -261,10 +319,22 @@ const loadTeachers = async () => {
   }
 }
 
+const loadClasses = async () => {
+  classesLoading.value = true
+  try {
+    classesData.value = await getAdminClasses(getParams()) ?? null
+  } catch (e) {
+    console.error('Failed to load classes', e)
+  } finally {
+    classesLoading.value = false
+  }
+}
+
 const handleTabChange = (tab: string) => {
   if (tab === 'overview') loadOverview()
   if (tab === 'students') loadStudents()
   if (tab === 'teachers') loadTeachers()
+  if (tab === 'classes') loadClasses()
   // 其他 Tab 待实现
 }
 
@@ -281,6 +351,7 @@ const refreshCurrentTab = () => {
   if (activeTab.value === 'overview') loadOverview()
   if (activeTab.value === 'students') loadStudents()
   if (activeTab.value === 'teachers') loadTeachers()
+  if (activeTab.value === 'classes') loadClasses()
   // 其他 Tab 待实现
 }
 

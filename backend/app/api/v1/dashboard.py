@@ -1849,3 +1849,275 @@ async def get_admin_teachers(
         "subject_distribution": subject_distribution,
         "workload_ranking": workload_ranking,
     })
+
+
+@router.get("/admin/classes", summary="管理员仪表盘 - 班级分析")
+async def get_admin_classes(
+    current_user: CurrentUser,
+    db: DBSession,
+    campus_id: Optional[int] = Query(None, description="校区ID（超管可选）"),
+    start_date: Optional[date] = Query(None, description="开始日期"),
+    end_date: Optional[date] = Query(None, description="结束日期"),
+):
+    """
+    管理员仪表盘 - 班级分析 Tab。
+    返回班级统计数据，包括：
+    - KPI卡片：班级总数、进行中班级、本月新开班、本月结业
+    - 状态分布：待开班/进行中/已结业
+    - 上座率分布：低(<50%)/中(50-80%)/高(>80%)
+    - 课程科目分布：根据 Course 统计
+    - 进度排名：按完成率排序的前10个班级
+
+    权限：
+    - 超管可以选择校区或查看全部
+    - 校区管理员只能看自己校区
+    """
+    scope = CampusScopedQuery()
+    _require_admin_role(current_user, scope)
+
+    role_code = scope.get_token_role_code(current_user)
+    is_super_admin = role_code == "super_admin"
+    token_campus_id = scope.get_campus_filter(current_user)
+
+    # 确定要查询的校区范围
+    filter_campus_id = None
+    if is_super_admin:
+        if campus_id:
+            filter_campus_id = campus_id
+        elif token_campus_id:
+            filter_campus_id = token_campus_id
+    else:
+        filter_campus_id = token_campus_id
+
+    today = date.today()
+    month_start = today.replace(day=1)
+
+    # 时间过滤标记
+    has_time_filter = bool(start_date or end_date)
+
+    # 构建基础查询条件
+    def apply_campus_filter(query, model=ClassPlan):
+        if filter_campus_id:
+            return query.where(model.campus_id == filter_campus_id)
+        return query
+
+    # ========== 1. KPI 卡片 ==========
+
+    # 班级总数
+    total_classes_query = (
+        select(func.count())
+        .select_from(ClassPlan)
+        .where(ClassPlan.is_active == True)
+    )
+    total_classes_query = apply_campus_filter(total_classes_query)
+    total_classes = (await db.execute(total_classes_query)).scalar() or 0
+
+    # 进行中班级数（status='ongoing'）
+    ongoing_classes_query = (
+        select(func.count())
+        .select_from(ClassPlan)
+        .where(
+            and_(
+                ClassPlan.is_active == True,
+                ClassPlan.status == "ongoing",
+            )
+        )
+    )
+    ongoing_classes_query = apply_campus_filter(ongoing_classes_query)
+    ongoing_classes = (await db.execute(ongoing_classes_query)).scalar() or 0
+
+    # 本月新开班（start_date 在本月）
+    new_classes_query = (
+        select(func.count())
+        .select_from(ClassPlan)
+        .where(
+            and_(
+                ClassPlan.is_active == True,
+                ClassPlan.start_date >= month_start,
+                ClassPlan.start_date <= today,
+            )
+        )
+    )
+    new_classes_query = apply_campus_filter(new_classes_query)
+    new_classes = (await db.execute(new_classes_query)).scalar() or 0
+
+    # 本月结业（status='completed' 且 end_date 在本月）
+    completed_classes_query = (
+        select(func.count())
+        .select_from(ClassPlan)
+        .where(
+            and_(
+                ClassPlan.is_active == True,
+                ClassPlan.status == "completed",
+                ClassPlan.end_date >= month_start,
+                ClassPlan.end_date <= today,
+            )
+        )
+    )
+    completed_classes_query = apply_campus_filter(completed_classes_query)
+    completed_classes = (await db.execute(completed_classes_query)).scalar() or 0
+
+    kpi_cards = [
+        KpiCard(
+            label="班级总数",
+            value=total_classes,
+            unit="个",
+        ).model_dump(),
+        KpiCard(
+            label="进行中班级",
+            value=ongoing_classes,
+            unit="个",
+        ).model_dump(),
+        KpiCard(
+            label="本月新开班",
+            value=new_classes,
+            unit="个",
+            is_time_filtered=has_time_filter,
+        ).model_dump(),
+        KpiCard(
+            label="本月结业",
+            value=completed_classes,
+            unit="个",
+            is_time_filtered=has_time_filter,
+        ).model_dump(),
+    ]
+
+    # ========== 2. 状态分布（GROUP BY status）==========
+    status_dist_query = (
+        select(
+            ClassPlan.status,
+            func.count(ClassPlan.id).label("count")
+        )
+        .where(ClassPlan.is_active == True)
+        .group_by(ClassPlan.status)
+    )
+    status_dist_query = apply_campus_filter(status_dist_query)
+    status_result = await db.execute(status_dist_query)
+
+    # 状态名称映射
+    status_labels = {
+        "pending": "待开班",
+        "ongoing": "进行中",
+        "completed": "已结业",
+        "cancelled": "已取消",
+    }
+    status_distribution = [
+        DistributionItem(
+            name=status_labels.get(row.status, row.status or "未知"),
+            value=float(row.count),
+        ).model_dump()
+        for row in status_result
+        if row.status  # 排除空状态
+    ]
+
+    # ========== 3. 上座率分布 ==========
+    # 计算每个班级的上座率 = current_students / max_students
+    # 分组：低(<50%), 中(50-80%), 高(>80%)
+
+    classes_query = (
+        select(ClassPlan.current_students, ClassPlan.max_students)
+        .where(
+            and_(
+                ClassPlan.is_active == True,
+                ClassPlan.max_students > 0,  # 避免除以零
+            )
+        )
+    )
+    classes_query = apply_campus_filter(classes_query)
+    classes_result = await db.execute(classes_query)
+
+    occupancy_counts = {"低(<50%)": 0, "中(50-80%)": 0, "高(>80%)": 0}
+    for row in classes_result:
+        if row.max_students > 0:
+            rate = row.current_students / row.max_students * 100
+            if rate < 50:
+                occupancy_counts["低(<50%)"] += 1
+            elif rate < 80:
+                occupancy_counts["中(50-80%)"] += 1
+            else:
+                occupancy_counts["高(>80%)"] += 1
+
+    occupancy_distribution = [
+        DistributionItem(name=name, value=float(count)).model_dump()
+        for name, count in occupancy_counts.items()
+        if count > 0
+    ]
+
+    # ========== 4. 课程科目分布（关联 Course 表）==========
+    subject_dist_query = (
+        select(
+            Course.subject,
+            func.count(ClassPlan.id).label("count")
+        )
+        .join(Course, Course.id == ClassPlan.course_id)
+        .where(
+            and_(
+                ClassPlan.is_active == True,
+                Course.subject.isnot(None),
+            )
+        )
+        .group_by(Course.subject)
+    )
+    subject_dist_query = apply_campus_filter(subject_dist_query)
+    subject_result = await db.execute(subject_dist_query)
+
+    subject_distribution = [
+        DistributionItem(
+            name=row.subject or "未分类",
+            value=float(row.count),
+        ).model_dump()
+        for row in subject_result
+    ]
+
+    # ========== 5. 进度排名（按完成率排序的前10个班级）==========
+    # 计算进度 = completed_lessons / total_lessons
+    progress_query = (
+        select(
+            ClassPlan.id,
+            ClassPlan.name,
+            ClassPlan.completed_lessons,
+            ClassPlan.total_lessons,
+            ClassPlan.status,
+        )
+        .where(
+            and_(
+                ClassPlan.is_active == True,
+                ClassPlan.total_lessons > 0,  # 避免除以零
+            )
+        )
+    )
+    progress_query = apply_campus_filter(progress_query)
+    progress_result = await db.execute(progress_query)
+
+    # 计算进度并排序
+    progress_data = []
+    for row in progress_result:
+        total = float(row.total_lessons)
+        completed = float(row.completed_lessons) if row.completed_lessons else 0
+        progress_percent = round((completed / total * 100) if total > 0 else 0, 1)
+        progress_data.append({
+            "id": row.id,
+            "name": row.name,
+            "progress": progress_percent,
+            "status": row.status,
+        })
+
+    # 按进度降序排序，取前10
+    progress_data.sort(key=lambda x: x["progress"], reverse=True)
+    progress_ranking = []
+    for rank, item in enumerate(progress_data[:10], 1):
+        status_label = status_labels.get(item["status"], item["status"])
+        progress_ranking.append({
+            "rank": rank,
+            "name": item["name"],
+            "value": item["progress"],
+            "extra": status_label,
+        })
+
+    return success_response({
+        "kpi_cards": kpi_cards,
+        "status_distribution": status_distribution,
+        "occupancy_distribution": occupancy_distribution,
+        "subject_distribution": subject_distribution,
+        "progress_ranking": progress_ranking,
+    })
