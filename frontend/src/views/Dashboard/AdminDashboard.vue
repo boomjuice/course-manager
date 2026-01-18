@@ -129,8 +129,52 @@
       </el-tab-pane>
 
       <el-tab-pane label="教师" name="teachers">
-        <div class="tab-content">
-          <el-empty description="教师分析（待实现）" />
+        <div class="tab-content" v-loading="teachersLoading">
+          <!-- KPI 卡片 -->
+          <el-row :gutter="20" class="kpi-row">
+            <el-col :span="6" v-for="kpi in teachersData?.kpi_cards" :key="kpi.label">
+              <KpiCard
+                :label="kpi.label"
+                :value="kpi.value"
+                :unit="kpi.unit"
+                :trend="kpi.trend"
+                :is-time-filtered="kpi.is_time_filtered"
+              />
+            </el-col>
+          </el-row>
+
+          <!-- 图表区域 -->
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <DistributionChart
+                v-if="teachersData?.status_distribution?.length"
+                title="教师状态分布"
+                :data="teachersData.status_distribution"
+                type="ring"
+              />
+            </el-col>
+            <el-col :span="12">
+              <DistributionChart
+                v-if="teachersData?.subject_distribution?.length"
+                title="科目分布"
+                :data="teachersData.subject_distribution"
+                type="pie"
+              />
+            </el-col>
+          </el-row>
+
+          <!-- 工作量排名表格 -->
+          <el-card class="ranking-card">
+            <template #header>
+              <span>教师工作量排名（Top 10）</span>
+            </template>
+            <el-table :data="teachersData?.workload_ranking || []" stripe>
+              <el-table-column prop="rank" label="排名" width="80" />
+              <el-table-column prop="name" label="教师" />
+              <el-table-column prop="value" label="课时数" />
+              <el-table-column prop="extra" label="备注" />
+            </el-table>
+          </el-card>
         </div>
       </el-tab-pane>
 
@@ -152,8 +196,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import { getAdminDashboard, getAdminStudents } from '@/api/dashboard'
-import type { AdminDashboardOverview, AdminDashboardStudents, TimeRangeParams } from '@/api/dashboard'
+import { getAdminDashboard, getAdminStudents, getAdminTeachers } from '@/api/dashboard'
+import type { AdminDashboardOverview, AdminDashboardStudents, AdminDashboardTeachers, TimeRangeParams } from '@/api/dashboard'
 import KpiCard from './components/KpiCard.vue'
 import TimeRangeSelector from './components/TimeRangeSelector.vue'
 import TrendChart from './components/TrendChart.vue'
@@ -164,12 +208,14 @@ const authStore = useAuthStore()
 const activeTab = ref('overview')
 const overviewData = ref<AdminDashboardOverview | null>(null)
 const studentsData = ref<AdminDashboardStudents | null>(null)
+const teachersData = ref<AdminDashboardTeachers | null>(null)
 const timeRange = ref<TimeRangeParams>({})
 const selectedCampusId = ref<number | null>(null)
 const campusList = ref<Array<{ id: number; name: string }>>([])
 
 const overviewLoading = ref(false)
 const studentsLoading = ref(false)
+const teachersLoading = ref(false)
 
 // 判断是否为超级管理员（可跨校区查看数据）
 const isSuperAdmin = computed(() => {
@@ -204,9 +250,21 @@ const loadStudents = async () => {
   }
 }
 
+const loadTeachers = async () => {
+  teachersLoading.value = true
+  try {
+    teachersData.value = await getAdminTeachers(getParams()) ?? null
+  } catch (e) {
+    console.error('Failed to load teachers', e)
+  } finally {
+    teachersLoading.value = false
+  }
+}
+
 const handleTabChange = (tab: string) => {
   if (tab === 'overview') loadOverview()
   if (tab === 'students') loadStudents()
+  if (tab === 'teachers') loadTeachers()
   // 其他 Tab 待实现
 }
 
@@ -222,6 +280,7 @@ const handleCampusChange = () => {
 const refreshCurrentTab = () => {
   if (activeTab.value === 'overview') loadOverview()
   if (activeTab.value === 'students') loadStudents()
+  if (activeTab.value === 'teachers') loadTeachers()
   // 其他 Tab 待实现
 }
 
@@ -270,6 +329,9 @@ onMounted(() => {
   margin-top: 20px;
 }
 .trend-row {
+  margin-top: 20px;
+}
+.ranking-card {
   margin-top: 20px;
 }
 </style>

@@ -1587,3 +1587,265 @@ async def get_admin_students(
         "grade_distribution": grade_distribution,
         "new_student_trend": new_student_trend,
     })
+
+
+@router.get("/admin/teachers", summary="管理员仪表盘 - 教师分析")
+async def get_admin_teachers(
+    current_user: CurrentUser,
+    db: DBSession,
+    campus_id: Optional[int] = Query(None, description="校区ID（超管可选）"),
+    start_date: Optional[date] = Query(None, description="开始日期"),
+    end_date: Optional[date] = Query(None, description="结束日期"),
+):
+    """
+    管理员仪表盘 - 教师分析 Tab。
+    返回教师统计数据，包括：
+    - KPI卡片：教师总数、在职教师数、本月新增、本月离职
+    - 状态分布：在职/休假/离职
+    - 科目分布：根据教师教授的科目统计
+    - 工作量排名：按课时数排序的前10名教师
+
+    权限：
+    - 超管可以选择校区或查看全部
+    - 校区管理员只能看自己校区有排课的教师
+    """
+    scope = CampusScopedQuery()
+    _require_admin_role(current_user, scope)
+
+    role_code = scope.get_token_role_code(current_user)
+    is_super_admin = role_code == "super_admin"
+    token_campus_id = scope.get_campus_filter(current_user)
+
+    # 确定要查询的校区范围
+    filter_campus_id = None
+    if is_super_admin:
+        if campus_id:
+            filter_campus_id = campus_id
+        elif token_campus_id:
+            filter_campus_id = token_campus_id
+    else:
+        filter_campus_id = token_campus_id
+
+    today = date.today()
+    month_start = today.replace(day=1)
+
+    # 如果有时间过滤，使用过滤时间
+    query_start = start_date if start_date else month_start
+    query_end = end_date if end_date else today
+    has_time_filter = bool(start_date or end_date)
+
+    # 教师没有 campus_id，但可以通过 Schedule 的 campus_id 进行过滤
+    # 如果有校区限制，只统计在该校区有排课的教师
+
+    # ========== 1. KPI 卡片 ==========
+
+    # 教师总数
+    total_teachers_query = select(func.count()).select_from(Teacher)
+    if filter_campus_id:
+        # 通过 Schedule 过滤在该校区有排课的教师
+        teacher_ids_subquery = (
+            select(Schedule.teacher_id)
+            .where(Schedule.campus_id == filter_campus_id)
+            .distinct()
+        )
+        total_teachers_query = total_teachers_query.where(
+            Teacher.id.in_(teacher_ids_subquery)
+        )
+    total_teachers = (await db.execute(total_teachers_query)).scalar() or 0
+
+    # 在职教师数（status='active' 且 is_active=True）
+    active_teachers_query = (
+        select(func.count())
+        .select_from(Teacher)
+        .where(
+            and_(
+                Teacher.status == "active",
+                Teacher.is_active == True,
+            )
+        )
+    )
+    if filter_campus_id:
+        teacher_ids_subquery = (
+            select(Schedule.teacher_id)
+            .where(Schedule.campus_id == filter_campus_id)
+            .distinct()
+        )
+        active_teachers_query = active_teachers_query.where(
+            Teacher.id.in_(teacher_ids_subquery)
+        )
+    active_teachers = (await db.execute(active_teachers_query)).scalar() or 0
+
+    # 本月新增（entry_date 在本月）
+    new_teachers_query = (
+        select(func.count())
+        .select_from(Teacher)
+        .where(Teacher.entry_date >= month_start)
+    )
+    if filter_campus_id:
+        teacher_ids_subquery = (
+            select(Schedule.teacher_id)
+            .where(Schedule.campus_id == filter_campus_id)
+            .distinct()
+        )
+        new_teachers_query = new_teachers_query.where(
+            Teacher.id.in_(teacher_ids_subquery)
+        )
+    new_teachers = (await db.execute(new_teachers_query)).scalar() or 0
+
+    # 本月离职（status='resigned'，且 updated_time 在本月）
+    # 注意：这里假设离职时会更新 status 和 updated_time
+    resigned_teachers_query = (
+        select(func.count())
+        .select_from(Teacher)
+        .where(
+            and_(
+                Teacher.status == "resigned",
+                Teacher.updated_time >= datetime.combine(month_start, datetime.min.time()),
+            )
+        )
+    )
+    if filter_campus_id:
+        teacher_ids_subquery = (
+            select(Schedule.teacher_id)
+            .where(Schedule.campus_id == filter_campus_id)
+            .distinct()
+        )
+        resigned_teachers_query = resigned_teachers_query.where(
+            Teacher.id.in_(teacher_ids_subquery)
+        )
+    resigned_teachers = (await db.execute(resigned_teachers_query)).scalar() or 0
+
+    kpi_cards = [
+        KpiCard(
+            label="教师总数",
+            value=total_teachers,
+            unit="人",
+        ).model_dump(),
+        KpiCard(
+            label="在职教师",
+            value=active_teachers,
+            unit="人",
+        ).model_dump(),
+        KpiCard(
+            label="本月新增",
+            value=new_teachers,
+            unit="人",
+            is_time_filtered=has_time_filter,
+        ).model_dump(),
+        KpiCard(
+            label="本月离职",
+            value=resigned_teachers,
+            unit="人",
+            is_time_filtered=has_time_filter,
+        ).model_dump(),
+    ]
+
+    # ========== 2. 状态分布（GROUP BY status）==========
+    status_dist_query = (
+        select(
+            Teacher.status,
+            func.count(Teacher.id).label("count")
+        )
+        .group_by(Teacher.status)
+    )
+    if filter_campus_id:
+        teacher_ids_subquery = (
+            select(Schedule.teacher_id)
+            .where(Schedule.campus_id == filter_campus_id)
+            .distinct()
+        )
+        status_dist_query = status_dist_query.where(
+            Teacher.id.in_(teacher_ids_subquery)
+        )
+    status_result = await db.execute(status_dist_query)
+
+    # 状态名称映射
+    status_labels = {
+        "active": "在职",
+        "on_leave": "休假",
+        "resigned": "离职",
+    }
+    status_distribution = [
+        DistributionItem(
+            name=status_labels.get(row.status, row.status or "未知"),
+            value=float(row.count),
+        ).model_dump()
+        for row in status_result
+        if row.status  # 排除空状态
+    ]
+
+    # ========== 3. 科目分布（统计教师的 subjects 数组字段）==========
+    # 教师的 subjects 是一个数组，需要展开统计
+    # 先查询所有教师的 subjects
+
+    teachers_query = select(Teacher.subjects)
+    if filter_campus_id:
+        teacher_ids_subquery = (
+            select(Schedule.teacher_id)
+            .where(Schedule.campus_id == filter_campus_id)
+            .distinct()
+        )
+        teachers_query = teachers_query.where(
+            Teacher.id.in_(teacher_ids_subquery)
+        )
+    teachers_result = await db.execute(teachers_query)
+
+    # 统计每个科目的教师数量
+    subject_counts: dict[str, int] = {}
+    for row in teachers_result:
+        subjects = row.subjects
+        if subjects:
+            for subject in subjects:
+                if subject:
+                    subject_counts[subject] = subject_counts.get(subject, 0) + 1
+
+    subject_distribution = [
+        DistributionItem(
+            name=subject,
+            value=float(count),
+        ).model_dump()
+        for subject, count in sorted(subject_counts.items(), key=lambda x: -x[1])
+    ]
+
+    # ========== 4. 工作量排名（按课时数排序的前10名教师）==========
+    # 统计在时间范围内已完成的课时
+    workload_query = (
+        select(
+            Teacher.id,
+            Teacher.name,
+            func.sum(Schedule.lesson_hours).label("total_hours")
+        )
+        .join(Schedule, Schedule.teacher_id == Teacher.id)
+        .where(
+            and_(
+                Schedule.status == "completed",
+                Schedule.schedule_date >= query_start,
+                Schedule.schedule_date <= query_end,
+            )
+        )
+        .group_by(Teacher.id, Teacher.name)
+        .order_by(func.sum(Schedule.lesson_hours).desc())
+        .limit(10)
+    )
+    if filter_campus_id:
+        workload_query = workload_query.where(Schedule.campus_id == filter_campus_id)
+
+    workload_result = await db.execute(workload_query)
+
+    workload_ranking = []
+    rank = 1
+    for row in workload_result:
+        workload_ranking.append({
+            "rank": rank,
+            "name": row.name,
+            "value": float(row.total_hours or 0),
+            "extra": f"ID: {row.id}",
+        })
+        rank += 1
+
+    return success_response({
+        "kpi_cards": kpi_cards,
+        "status_distribution": status_distribution,
+        "subject_distribution": subject_distribution,
+        "workload_ranking": workload_ranking,
+    })
