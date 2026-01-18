@@ -40,6 +40,7 @@ from app.schemas.dashboard import (
     TeacherClassItem,
     TeacherStudentAttendance,
 )
+from app.models.campus import Campus
 
 router = APIRouter(prefix="/dashboard", tags=["仪表盘"])
 
@@ -1064,3 +1065,291 @@ async def get_teacher_income(
     )
 
     return success_response(response.model_dump())
+
+
+# ========== 管理员仪表盘端点 ==========
+
+def _require_admin_role(current_user, scope: CampusScopedQuery):
+    """
+    检查当前用户是否是管理员角色（超管或校区管理员）。
+    如果不是管理员角色，抛出 403 错误。
+    """
+    role_code = scope.get_token_role_code(current_user)
+    if role_code not in ("super_admin", "campus_admin"):
+        raise ForbiddenException("此接口仅供管理员访问")
+
+
+class AdminDashboardResponse(BaseModel):
+    """管理员仪表盘响应（灵活格式）"""
+    kpi_cards: List[dict]
+    enrollment_trend: List[dict]
+    revenue_trend: Optional[List[dict]] = None
+    campus_comparison: Optional[List[dict]] = None
+
+
+@router.get("/admin", summary="管理员仪表盘概览")
+async def get_admin_dashboard_overview(
+    current_user: CurrentUser,
+    db: DBSession,
+    campus_id: Optional[int] = Query(None, description="校区ID（超管可选）"),
+    start_date: Optional[date] = Query(None, description="开始日期"),
+    end_date: Optional[date] = Query(None, description="结束日期"),
+):
+    """
+    获取管理员仪表盘概览数据。
+    包含：
+    - KPI卡片：学生总数、教师总数、进行中班级数、本月收入
+    - 报名趋势（近7天）
+    - 收入趋势（近7天）
+    - 校区对比（仅超管不选校区时返回）
+
+    权限：
+    - 超管可以选择校区或查看全部
+    - 校区管理员只能看自己校区
+    """
+    scope = CampusScopedQuery()
+    _require_admin_role(current_user, scope)
+
+    role_code = scope.get_token_role_code(current_user)
+    is_super_admin = role_code == "super_admin"
+    token_campus_id = scope.get_campus_filter(current_user)
+
+    # 确定要查询的校区范围
+    filter_campus_id = None
+    show_campus_comparison = False
+
+    if is_super_admin:
+        # 超管可以选择校区
+        if campus_id:
+            filter_campus_id = campus_id
+        elif token_campus_id:
+            filter_campus_id = token_campus_id
+        else:
+            # 超管未选校区，显示全部数据和校区对比
+            show_campus_comparison = True
+    else:
+        # 校区管理员只能看自己校区
+        filter_campus_id = token_campus_id
+
+    today = date.today()
+    week_ago = today - timedelta(days=7)
+    month_start = today.replace(day=1)
+
+    # 如果有时间过滤，使用过滤时间
+    query_start = start_date if start_date else week_ago
+    query_end = end_date if end_date else today
+
+    # 1. 查询学生总数
+    student_query = select(func.count()).select_from(Student).where(Student.status == "active")
+    if filter_campus_id:
+        student_query = student_query.where(Student.campus_id == filter_campus_id)
+    total_students = (await db.execute(student_query)).scalar() or 0
+
+    # 2. 查询教师总数（教师无校区限制，但可以统计有排课的教师）
+    teacher_query = select(func.count()).select_from(Teacher).where(Teacher.is_active == True)
+    total_teachers = (await db.execute(teacher_query)).scalar() or 0
+
+    # 3. 查询进行中班级数
+    class_plan_query = (
+        select(func.count())
+        .select_from(ClassPlan)
+        .where(
+            and_(
+                ClassPlan.is_active == True,
+                ClassPlan.status == "ongoing",
+            )
+        )
+    )
+    if filter_campus_id:
+        class_plan_query = class_plan_query.where(ClassPlan.campus_id == filter_campus_id)
+    active_classes = (await db.execute(class_plan_query)).scalar() or 0
+
+    # 4. 查询本月收入（报名的paid_amount）
+    revenue_query = (
+        select(func.sum(Enrollment.paid_amount))
+        .where(
+            and_(
+                Enrollment.created_time >= datetime.combine(month_start, datetime.min.time()),
+                Enrollment.status == "active",
+            )
+        )
+    )
+    if filter_campus_id:
+        revenue_query = revenue_query.where(Enrollment.campus_id == filter_campus_id)
+    month_revenue = float((await db.execute(revenue_query)).scalar() or 0)
+
+    # 5. 构建KPI卡片
+    kpi_cards = [
+        KpiCard(
+            label="学生总数",
+            value=total_students,
+            unit="人",
+        ).model_dump(),
+        KpiCard(
+            label="教师总数",
+            value=total_teachers,
+            unit="人",
+        ).model_dump(),
+        KpiCard(
+            label="进行中班级",
+            value=active_classes,
+            unit="个",
+        ).model_dump(),
+        KpiCard(
+            label="本月收入",
+            value=month_revenue,
+            unit="元",
+            is_time_filtered=bool(start_date or end_date),
+        ).model_dump(),
+    ]
+
+    # 6. 查询报名趋势（近7天）
+    # 使用 func.date() 以兼容 SQLite
+    enrollment_trend_query = (
+        select(
+            func.date(Enrollment.created_time).label("enroll_date"),
+            func.count(Enrollment.id).label("count"),
+        )
+        .where(
+            and_(
+                Enrollment.created_time >= datetime.combine(query_start, datetime.min.time()),
+                Enrollment.created_time <= datetime.combine(query_end, datetime.max.time()),
+            )
+        )
+        .group_by(func.date(Enrollment.created_time))
+        .order_by(func.date(Enrollment.created_time))
+    )
+    if filter_campus_id:
+        enrollment_trend_query = enrollment_trend_query.where(Enrollment.campus_id == filter_campus_id)
+
+    enrollment_trend_result = await db.execute(enrollment_trend_query)
+    # enroll_date 可能是字符串或 date 对象，需要统一处理
+    enrollment_data = {}
+    for row in enrollment_trend_result:
+        d = row.enroll_date
+        if isinstance(d, str):
+            d = date.fromisoformat(d)
+        enrollment_data[d] = row.count
+
+    # 补齐所有日期
+    enrollment_trend = []
+    current = query_start
+    while current <= query_end:
+        date_str = current.strftime("%Y-%m-%d")
+        count = enrollment_data.get(current, 0)
+        enrollment_trend.append(DashboardTrendDataPoint(
+            date=date_str,
+            value=float(count),
+            label=current.strftime("%m-%d"),
+        ).model_dump())
+        current += timedelta(days=1)
+
+    # 7. 查询收入趋势（近7天）
+    # 使用 func.date() 以兼容 SQLite
+    revenue_trend_query = (
+        select(
+            func.date(Enrollment.created_time).label("enroll_date"),
+            func.sum(Enrollment.paid_amount).label("amount"),
+        )
+        .where(
+            and_(
+                Enrollment.created_time >= datetime.combine(query_start, datetime.min.time()),
+                Enrollment.created_time <= datetime.combine(query_end, datetime.max.time()),
+                Enrollment.status == "active",
+            )
+        )
+        .group_by(func.date(Enrollment.created_time))
+        .order_by(func.date(Enrollment.created_time))
+    )
+    if filter_campus_id:
+        revenue_trend_query = revenue_trend_query.where(Enrollment.campus_id == filter_campus_id)
+
+    revenue_trend_result = await db.execute(revenue_trend_query)
+    # enroll_date 可能是字符串或 date 对象，需要统一处理
+    revenue_data = {}
+    for row in revenue_trend_result:
+        d = row.enroll_date
+        if isinstance(d, str):
+            d = date.fromisoformat(d)
+        revenue_data[d] = float(row.amount or 0)
+
+    # 补齐所有日期
+    revenue_trend = []
+    current = query_start
+    while current <= query_end:
+        date_str = current.strftime("%Y-%m-%d")
+        amount = revenue_data.get(current, 0)
+        revenue_trend.append(DashboardTrendDataPoint(
+            date=date_str,
+            value=amount,
+            label=current.strftime("%m-%d"),
+        ).model_dump())
+        current += timedelta(days=1)
+
+    # 8. 校区对比（仅超管不选校区时）
+    campus_comparison = None
+    if show_campus_comparison:
+        # 获取所有校区
+        campuses_result = await db.execute(
+            select(Campus).where(Campus.is_active == True)
+        )
+        campuses = campuses_result.scalars().all()
+
+        campus_comparison = []
+        for campus in campuses:
+            # 查询每个校区的学生数
+            c_students = (await db.execute(
+                select(func.count())
+                .select_from(Student)
+                .where(
+                    and_(
+                        Student.campus_id == campus.id,
+                        Student.status == "active",
+                    )
+                )
+            )).scalar() or 0
+
+            # 查询每个校区的班级数
+            c_classes = (await db.execute(
+                select(func.count())
+                .select_from(ClassPlan)
+                .where(
+                    and_(
+                        ClassPlan.campus_id == campus.id,
+                        ClassPlan.is_active == True,
+                        ClassPlan.status == "ongoing",
+                    )
+                )
+            )).scalar() or 0
+
+            # 查询每个校区的本月收入
+            c_revenue = float((await db.execute(
+                select(func.sum(Enrollment.paid_amount))
+                .where(
+                    and_(
+                        Enrollment.campus_id == campus.id,
+                        Enrollment.created_time >= datetime.combine(month_start, datetime.min.time()),
+                        Enrollment.status == "active",
+                    )
+                )
+            )).scalar() or 0)
+
+            campus_comparison.append({
+                "campus_id": campus.id,
+                "campus_name": campus.name,
+                "students": c_students,
+                "active_classes": c_classes,
+                "month_revenue": c_revenue,
+            })
+
+    # 构建响应
+    response_data = {
+        "kpi_cards": kpi_cards,
+        "enrollment_trend": enrollment_trend,
+        "revenue_trend": revenue_trend,
+    }
+
+    if campus_comparison is not None:
+        response_data["campus_comparison"] = campus_comparison
+
+    return success_response(response_data)
