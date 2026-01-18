@@ -1069,11 +1069,13 @@ async def get_teacher_income(
 
 # ========== 管理员仪表盘端点 ==========
 
-def _require_admin_role(current_user, scope: CampusScopedQuery):
+def _require_admin_role(current_user, scope: CampusScopedQuery = None):
     """
     检查当前用户是否是管理员角色（超管或校区管理员）。
     如果不是管理员角色，抛出 403 错误。
     """
+    if scope is None:
+        scope = CampusScopedQuery()
     role_code = scope.get_token_role_code(current_user)
     if role_code not in ("super_admin", "campus_admin"):
         raise ForbiddenException("此接口仅供管理员访问")
@@ -1353,3 +1355,235 @@ async def get_admin_dashboard_overview(
         response_data["campus_comparison"] = campus_comparison
 
     return success_response(response_data)
+
+
+@router.get("/admin/students", summary="管理员仪表盘 - 学生分析")
+async def get_admin_students(
+    current_user: CurrentUser,
+    db: DBSession,
+    campus_id: Optional[int] = Query(None, description="校区ID（超管可选）"),
+    start_date: Optional[date] = Query(None, description="开始日期"),
+    end_date: Optional[date] = Query(None, description="结束日期"),
+):
+    """
+    管理员仪表盘 - 学生分析 Tab。
+    返回学生统计数据，包括：
+    - KPI卡片：学生总数、活跃学生数、本月新增、流失学生数
+    - 状态分布：活跃/休学/结业/流失
+    - 来源分布：老学员介绍/网络推广/地推/其他
+    - 年级分布：按年级统计
+    - 新增学生趋势：按日期统计新增学生
+
+    权限：
+    - 超管可以选择校区或查看全部
+    - 校区管理员只能看自己校区
+    """
+    scope = CampusScopedQuery()
+    _require_admin_role(current_user, scope)
+
+    role_code = scope.get_token_role_code(current_user)
+    is_super_admin = role_code == "super_admin"
+    token_campus_id = scope.get_campus_filter(current_user)
+
+    # 确定要查询的校区范围
+    filter_campus_id = None
+    if is_super_admin:
+        if campus_id:
+            filter_campus_id = campus_id
+        elif token_campus_id:
+            filter_campus_id = token_campus_id
+    else:
+        filter_campus_id = token_campus_id
+
+    today = date.today()
+    month_start = today.replace(day=1)
+
+    # 如果有时间过滤，使用过滤时间；否则使用近30天
+    query_start = start_date if start_date else (today - timedelta(days=30))
+    query_end = end_date if end_date else today
+    has_time_filter = bool(start_date or end_date)
+
+    # 构建基础查询条件
+    def apply_campus_filter(query, model=Student):
+        if filter_campus_id:
+            return query.where(model.campus_id == filter_campus_id)
+        return query
+
+    # ========== 1. KPI 卡片 ==========
+
+    # 学生总数
+    total_students_query = select(func.count()).select_from(Student)
+    total_students_query = apply_campus_filter(total_students_query)
+    total_students = (await db.execute(total_students_query)).scalar() or 0
+
+    # 活跃学生数（status='active'）
+    active_students_query = (
+        select(func.count())
+        .select_from(Student)
+        .where(Student.status == "active")
+    )
+    active_students_query = apply_campus_filter(active_students_query)
+    active_students = (await db.execute(active_students_query)).scalar() or 0
+
+    # 本月新增（created_time 在本月）
+    new_students_query = (
+        select(func.count())
+        .select_from(Student)
+        .where(Student.created_time >= datetime.combine(month_start, datetime.min.time()))
+    )
+    new_students_query = apply_campus_filter(new_students_query)
+    new_students = (await db.execute(new_students_query)).scalar() or 0
+
+    # 流失学生数（status='churned'）
+    churned_students_query = (
+        select(func.count())
+        .select_from(Student)
+        .where(Student.status == "churned")
+    )
+    churned_students_query = apply_campus_filter(churned_students_query)
+    churned_students = (await db.execute(churned_students_query)).scalar() or 0
+
+    kpi_cards = [
+        KpiCard(
+            label="学生总数",
+            value=total_students,
+            unit="人",
+        ).model_dump(),
+        KpiCard(
+            label="活跃学生",
+            value=active_students,
+            unit="人",
+        ).model_dump(),
+        KpiCard(
+            label="本月新增",
+            value=new_students,
+            unit="人",
+            is_time_filtered=has_time_filter,
+        ).model_dump(),
+        KpiCard(
+            label="流失学生",
+            value=churned_students,
+            unit="人",
+        ).model_dump(),
+    ]
+
+    # ========== 2. 状态分布（GROUP BY status）==========
+    status_dist_query = (
+        select(
+            Student.status,
+            func.count(Student.id).label("count")
+        )
+        .group_by(Student.status)
+    )
+    status_dist_query = apply_campus_filter(status_dist_query)
+    status_result = await db.execute(status_dist_query)
+
+    # 状态名称映射
+    status_labels = {
+        "active": "活跃",
+        "inactive": "休学",
+        "graduated": "结业",
+        "churned": "流失",
+    }
+    status_distribution = [
+        DistributionItem(
+            name=status_labels.get(row.status, row.status or "未知"),
+            value=float(row.count),
+        ).model_dump()
+        for row in status_result
+        if row.status  # 排除空状态
+    ]
+
+    # ========== 3. 来源分布（GROUP BY source）==========
+    source_dist_query = (
+        select(
+            Student.source,
+            func.count(Student.id).label("count")
+        )
+        .where(Student.source.isnot(None))  # 排除空来源
+        .group_by(Student.source)
+    )
+    source_dist_query = apply_campus_filter(source_dist_query)
+    source_result = await db.execute(source_dist_query)
+
+    # 来源名称映射
+    source_labels = {
+        "referral": "老学员介绍",
+        "online": "网络推广",
+        "offline": "地推",
+        "other": "其他",
+    }
+    source_distribution = [
+        DistributionItem(
+            name=source_labels.get(row.source, row.source or "未知"),
+            value=float(row.count),
+        ).model_dump()
+        for row in source_result
+    ]
+
+    # ========== 4. 年级分布（GROUP BY grade）==========
+    grade_dist_query = (
+        select(
+            Student.grade,
+            func.count(Student.id).label("count")
+        )
+        .where(Student.grade.isnot(None))  # 排除空年级
+        .group_by(Student.grade)
+    )
+    grade_dist_query = apply_campus_filter(grade_dist_query)
+    grade_result = await db.execute(grade_dist_query)
+
+    grade_distribution = [
+        DistributionItem(
+            name=row.grade or "未知",
+            value=float(row.count),
+        ).model_dump()
+        for row in grade_result
+    ]
+
+    # ========== 5. 新增学生趋势（按日期统计 created_time）==========
+    trend_query = (
+        select(
+            func.date(Student.created_time).label("create_date"),
+            func.count(Student.id).label("count"),
+        )
+        .where(
+            and_(
+                Student.created_time >= datetime.combine(query_start, datetime.min.time()),
+                Student.created_time <= datetime.combine(query_end, datetime.max.time()),
+            )
+        )
+        .group_by(func.date(Student.created_time))
+        .order_by(func.date(Student.created_time))
+    )
+    trend_query = apply_campus_filter(trend_query)
+    trend_result = await db.execute(trend_query)
+
+    # 处理趋势数据，统一日期格式
+    trend_data = {}
+    for row in trend_result:
+        d = row.create_date
+        if isinstance(d, str):
+            d = date.fromisoformat(d)
+        trend_data[d] = row.count
+
+    # 补齐所有日期
+    new_student_trend = []
+    current = query_start
+    while current <= query_end:
+        date_str = current.strftime("%Y-%m-%d")
+        count = trend_data.get(current, 0)
+        new_student_trend.append(DashboardTrendDataPoint(
+            date=date_str,
+            value=float(count),
+            label=current.strftime("%m-%d"),
+        ).model_dump())
+        current += timedelta(days=1)
+
+    return success_response({
+        "kpi_cards": kpi_cards,
+        "status_distribution": status_distribution,
+        "source_distribution": source_distribution,
+        "grade_distribution": grade_distribution,
+        "new_student_trend": new_student_trend,
+    })
