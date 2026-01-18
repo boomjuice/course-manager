@@ -1,0 +1,257 @@
+/**
+ * Element Plus Theme Customization - Modern Minimalist Style
+ */
+@use './variables.scss' as *;
+
+// Override Element Plus CSS Variables
+:root {
+  // Primary color
+  --el-color-primary: #{$primary-500};
+  --el-color-primary-light-3: #{$primary-300};
+  --el-color-primary-light-5: #{$primary-200};
+  --el-color-primary-light-7: #{$primary-100};
+  --el-color-primary-light-8: #{$primary-100};
+  --el-color-primary-light-9: #{$primary-50};
+  --el-color-primary-dark-2: #{$primary-600};
+
+  // Success/Warning/Danger/Info colors
+  --el-color-success: var(--success);
+  --el-color-warning: var(--warning);
+  --el-color-danger: var(--danger);
+  --el-color-info: var(--info);
+
+  // Text colors
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: var(--text-secondary);
+  --el-text-color-secondary: var(--text-tertiary);
+
+  // Border colors
+  --el-border-color: var(--border-light);
+  --el-border-color-light: var(--border-light);
+  --el-border-color-lighter: #{$gray-100};
+
+  // Background colors
+  --el-bg-color: var(--bg-primary);
+  --el-bg-color-page: var(--bg-secondary);
+  --el-bg-color-overlay: var(--bg-primary);
+
+  // Border radius
+  --el-border-radius-base: var(--radius-md);
+  --el-border-radius-small: var(--radius-sm);
+  --el-border-radius-round: var(--radius-full);
+}
+
+// Button styles
+.el-button {
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  transition: all var(--transition-fast);
+
+  &--primary {
+    background: var(--primary-500);
+    border-color: var(--primary-500);
+
+    &:hover,
+    &:focus {
+      background: var(--primary-600);
+      border-color: var(--primary-600);
+    }
+
+    &:active {
+      background: var(--primary-700);
+      border-color: var(--primary-700);
+    }
+  }
+
+  &--default {
+    &:hover,
+    &:focus {
+      color: var(--primary-500);
+      border-color: var(--primary-300);
+      background: var(--primary-50);
+    }
+  }
+}
+
+// Card styles
+.el-card {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-light);
+  box-shadow: var(--shadow-sm);
+
+  &__header {
+    padding: var(--spacing-lg);
+    border-bottom: 1px solid var(--gray-100);
+    font-weight: 600;
+    font-size: 16px;
+    color: var(--text-primary);
+  }
+
+  &__body {
+    padding: var(--spacing-lg);
+  }
+}
+
+// Table styles
+.el-table {
+  --el-table-border-color: var(--gray-100);
+  --el-table-header-bg-color: var(--bg-secondary);
+  --el-table-row-hover-bg-color: var(--bg-secondary);
+
+  border: none;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+
+  // 表头和明细统一左对齐，.cell必须填满整个单元格
+  th.el-table__cell,
+  td.el-table__cell {
+    text-align: left !important;
+
+    .cell {
+      text-align: left !important;
+      width: 100% !important;
+      box-sizing: border-box !important;
+    }
+  }
+
+  // 只有明确设置居中/右对齐的列才居中/右对齐
+  th.el-table__cell.is-center,
+  td.el-table__cell.is-center {
+    text-align: center !important;
+
+    .cell {
+      text-align: center !important;
+    }
+  }
+
+  th.el-table__cell.is-right,
+  td.el-table__cell.is-right {
+    text-align: right !important;
+
+    .cell {
+      text-align: right !important;
+    }
+  }
+
+  th.el-table__cell {
+    background: var(--bg-secondary) !important;
+    color: var(--gray-600);
+    font-weight: 500;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  td.el-table__cell {
+    border-bottom: 1px solid var(--gray-100);
+  }
+
+  tr:hover > td {
+    background: var(--bg-secondary);
+  }
+}
+
+// Input styles
+.el-input {
+  --el-input-border-radius: var(--radius-md);
+
+  .el-input__wrapper {
+    border-radius: var(--radius-md);
+    box-shadow: none;
+    border: 1px solid var(--border-light);
+    transition: all var(--transition-fast);
+
+    &:hover {
+      border-color: var(--border-default);
+    }
+
+    &.is-focus {
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px var(--primary-100);
+    }
+  }
+}
+
+// Select styles
+.el-select {
+  .el-input__wrapper {
+    border-radius: var(--radius-md);
+  }
+}
+
+// Dialog styles - 垂直水平居中
+.el-overlay-dialog {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: auto;
+}
+
+.el-dialog {
+  margin: 0 !important;  // 覆盖默认的margin-top: 15vh
+  border-radius: var(--radius-xl);
+  max-height: 90vh;  // 限制最大高度
+  display: flex;
+  flex-direction: column;
+
+  .el-dialog__header {
+    padding: var(--spacing-lg);
+    border-bottom: 1px solid var(--gray-100);
+    flex-shrink: 0;
+  }
+
+  .el-dialog__body {
+    padding: var(--spacing-lg);
+    overflow-y: auto;  // 内容超出时滚动
+    flex: 1;
+  }
+
+  .el-dialog__footer {
+    padding: var(--spacing-md) var(--spacing-lg);
+    border-top: 1px solid var(--gray-100);
+    flex-shrink: 0;
+  }
+}
+
+// Form styles
+.el-form-item__label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+// Pagination styles
+.el-pagination {
+  .el-pager li {
+    border-radius: var(--radius-sm);
+
+    &.is-active {
+      background: var(--primary-500);
+      color: #ffffff !important;  // 这个SB问题终于被老王发现了
+    }
+  }
+}
+
+// Menu styles
+.el-menu {
+  border-right: none;
+
+  &--vertical {
+    .el-menu-item,
+    .el-sub-menu__title {
+      border-radius: var(--radius-md);
+      margin: 4px 8px;
+      height: 44px;
+      line-height: 44px;
+    }
+
+    .el-menu-item.is-active {
+      background: var(--primary-50);
+      color: var(--primary-600);
+    }
+  }
+}
+
+// Tag styles
+.el-tag {
+  border-radius: var(--radius-sm);
+}

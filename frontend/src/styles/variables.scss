@@ -1,0 +1,109 @@
+/**
+ * Global CSS Variables - Modern Minimalist + Blue Theme
+ */
+
+:root {
+  // Primary Colors - Professional Blue
+  --primary-50: #EBF5FF;
+  --primary-100: #E1EFFE;
+  --primary-200: #C3DDFD;
+  --primary-300: #A4CAFE;
+  --primary-400: #76A9FA;
+  --primary-500: #3F83F8;  // Main Primary
+  --primary-600: #1C64F2;
+  --primary-700: #1A56DB;
+  --primary-800: #1E429F;
+  --primary-900: #233876;
+
+  // Neutral Colors
+  --gray-50: #F9FAFB;
+  --gray-100: #F3F4F6;
+  --gray-200: #E5E7EB;
+  --gray-300: #D1D5DB;
+  --gray-400: #9CA3AF;
+  --gray-500: #6B7280;
+  --gray-600: #4B5563;
+  --gray-700: #374151;
+  --gray-800: #1F2937;
+  --gray-900: #111827;
+
+  // Semantic Colors
+  --success: #10B981;
+  --success-light: #D1FAE5;
+  --warning: #F59E0B;
+  --warning-light: #FEF3C7;
+  --danger: #EF4444;
+  --danger-light: #FEE2E2;
+  --info: #3B82F6;
+  --info-light: #DBEAFE;
+
+  // Background Colors
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F9FAFB;
+  --bg-tertiary: #F3F4F6;
+
+  // Text Colors
+  --text-primary: #111827;
+  --text-secondary: #4B5563;
+  --text-tertiary: #9CA3AF;
+  --text-inverse: #FFFFFF;
+
+  // Border Colors
+  --border-light: #E5E7EB;
+  --border-default: #D1D5DB;
+  --border-focus: #3F83F8;
+
+  // Spacing
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+  --spacing-2xl: 48px;
+  --spacing-3xl: 64px;
+
+  // Border Radius
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  // Shadows
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+
+  // Transitions
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
+  --transition-slow: 350ms ease;
+
+  // Layout
+  --sidebar-width: 240px;
+  --header-height: 64px;
+  --content-max-width: 1440px;
+}
+
+// SCSS Variables for use in Sass files
+$primary-50: #EBF5FF;
+$primary-100: #E1EFFE;
+$primary-200: #C3DDFD;
+$primary-300: #A4CAFE;
+$primary-400: #76A9FA;
+$primary-500: #3F83F8;
+$primary-600: #1C64F2;
+$primary-700: #1A56DB;
+$primary-800: #1E429F;
+$primary-900: #233876;
+
+$gray-50: #F9FAFB;
+$gray-100: #F3F4F6;
+$gray-200: #E5E7EB;
+$gray-300: #D1D5DB;
+$gray-400: #9CA3AF;
+$gray-500: #6B7280;
+$gray-600: #4B5563;
+$gray-700: #374151;
+$gray-800: #1F2937;
+$gray-900: #111827;
